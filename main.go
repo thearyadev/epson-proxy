@@ -21,6 +21,9 @@ import (
 	"time"
 )
 
+// Version is set at build time via ldflags
+var Version = "dev"
+
 func generateCert() error {
 	certPath := "server.crt"
 	keyPath := "server.key"
@@ -108,8 +111,6 @@ func isOriginAllowed(origin string, allowedOrigins []string) bool {
 }
 
 func main() {
-	log.Printf("[MAIN] Epson Proxy Server starting up...")
-
 	var (
 		printerConn    = flag.String("printer", "", "Printer connection string (required)")
 		receiptWidth   = flag.Int("receipt-width", 576, "Receipt width in pixels")
@@ -118,8 +119,16 @@ func main() {
 		port           = flag.String("port", "8000", "Server port")
 		secure         = flag.Bool("secure", false, "Use HTTPS")
 		allowedOrigins = flag.String("allow-origins", "", "Comma-separated list of allowed CORS origins (empty = allow all)")
+		version        = flag.Bool("version", false, "Print version and exit")
 	)
 	flag.Parse()
+
+	if *version {
+		fmt.Println(Version)
+		os.Exit(0)
+	}
+
+	log.Printf("[MAIN] Epson Proxy Server starting up...")
 
 	// Parse allowed origins
 	var originsList []string
