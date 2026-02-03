@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -91,18 +92,47 @@ func generateCert() error {
 	return nil
 }
 
+// isOriginAllowed checks if the given origin is in the whitelist
+func isOriginAllowed(origin string, allowedOrigins []string) bool {
+	if len(allowedOrigins) == 0 {
+		// No whitelist configured, allow all
+		return true
+	}
+
+	for _, allowed := range allowedOrigins {
+		if strings.EqualFold(origin, allowed) {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
 	log.Printf("[MAIN] Epson Proxy Server starting up...")
 
 	var (
-		printerConn  = flag.String("printer", "", "Printer connection string (required)")
-		receiptWidth = flag.Int("receipt-width", 576, "Receipt width in pixels")
-		proto        = flag.String("proto", "", "Protocol: USB or TCP (required)")
-		host         = flag.String("host", "127.0.0.1", "Server host")
-		port         = flag.String("port", "8000", "Server port")
-		secure       = flag.Bool("secure", false, "Use HTTPS")
+		printerConn    = flag.String("printer", "", "Printer connection string (required)")
+		receiptWidth   = flag.Int("receipt-width", 576, "Receipt width in pixels")
+		proto          = flag.String("proto", "", "Protocol: USB or TCP (required)")
+		host           = flag.String("host", "127.0.0.1", "Server host")
+		port           = flag.String("port", "8000", "Server port")
+		secure         = flag.Bool("secure", false, "Use HTTPS")
+		allowedOrigins = flag.String("allow-origins", "", "Comma-separated list of allowed CORS origins (empty = allow all)")
 	)
 	flag.Parse()
+
+	// Parse allowed origins
+	var originsList []string
+	if *allowedOrigins != "" {
+		originsList = strings.Split(*allowedOrigins, ",")
+		// Trim whitespace from each origin
+		for i, origin := range originsList {
+			originsList[i] = strings.TrimSpace(origin)
+		}
+		log.Printf("[MAIN] CORS whitelist configured: %v", originsList)
+	} else {
+		log.Printf("[MAIN] CORS whitelist not configured - allowing all origins")
+	}
 
 	log.Printf("[MAIN] Command-line arguments parsed:")
 	log.Printf("[MAIN]   -printer: %s", *printerConn)
@@ -111,6 +141,7 @@ func main() {
 	log.Printf("[MAIN]   -host: %s", *host)
 	log.Printf("[MAIN]   -port: %s", *port)
 	log.Printf("[MAIN]   -secure: %v", *secure)
+	log.Printf("[MAIN]   -allow-origins: %s", *allowedOrigins)
 
 	if *printerConn == "" {
 		log.Printf("[MAIN] ERROR: Required flag -printer not provided")
@@ -158,11 +189,24 @@ func main() {
 	requestCount := 0
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
+		origin := r.Header.Get("Origin")
 		log.Printf("[HTTP] Request #%d received: %s %s from %s", requestCount, r.Method, r.URL.Path, r.RemoteAddr)
 		log.Printf("[HTTP]   Content-Type: %s", r.Header.Get("Content-Type"))
 		log.Printf("[HTTP]   Content-Length: %d", r.ContentLength)
+		log.Printf("[HTTP]   Origin: %s", origin)
 
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// Check CORS origin
+		if !isOriginAllowed(origin, originsList) {
+			log.Printf("[HTTP] Request #%d: CORS blocked - origin '%s' not in whitelist", requestCount, origin)
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprintf(w, "CORS Error: Origin '%s' is not allowed\n", origin)
+			return
+		}
+
+		// Set CORS headers for allowed origin
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
@@ -258,6 +302,7 @@ func main() {
 	log.Printf("[MAIN] HTTP server configured:")
 	log.Printf("[MAIN]   Listen address: %s", addr)
 	log.Printf("[MAIN]   Secure (HTTPS): %v", *secure)
+	log.Printf("[MAIN]   Allowed Origins: %v", originsList)
 
 	// Setup graceful shutdown
 	sigChan := make(chan os.Signal, 1)

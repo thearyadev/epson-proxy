@@ -81,7 +81,23 @@ Options:
   
   -secure
         Use HTTPS (auto-generates self-signed certificate)
+  
+  -allow-origins string
+        Comma-separated list of allowed CORS origins (empty = allow all)
+        Example: "https://example.com,https://app.example.com"
 ```
+
+## CORS Configuration
+
+By default, the server allows all origins (`*`). For production use, you should whitelist specific origins:
+
+### Allow Specific Origins
+```bash
+./epson-proxy -printer /dev/usb/lp0 -proto USB -allow-origins "https://example.com,https://app.example.com"
+```
+
+### Blocked Origins
+When CORS whitelist is configured, requests from non-whitelisted origins will receive a `403 Forbidden` response with the message: `CORS Error: Origin 'X' is not allowed`
 
 ## Example Usage
 
@@ -124,6 +140,18 @@ The proxy accepts Epson's EPOS XML format:
   <cut/>    <!-- Cut paper -->
 </epos-print>
 ```
+
+## Security Considerations
+
+### CORS Whitelisting
+- Always configure `-allow-origins` in production environments
+- The default behavior (allow all) is suitable for development only
+- Origins are matched case-insensitively
+
+### HTTPS
+- Use `-secure` flag for encrypted connections
+- Self-signed certificates are auto-generated for localhost
+- For production, consider using proper SSL certificates
 
 ## License
 
