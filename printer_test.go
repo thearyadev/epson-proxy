@@ -632,3 +632,40 @@ func TestWithRetry_CloseAndOpenSequence(t *testing.T) {
 		t.Errorf("expected Open to be called 1 time (after first failure only), got %d", mock.OpenCallCount)
 	}
 }
+
+func TestReset_Bytes(t *testing.T) {
+	printer, path := createMockPrinter()
+	defer os.Remove(path)
+
+	err := printer.Reset()
+	if err != nil {
+		t.Fatalf("Reset failed: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read file: %v", err)
+	}
+
+	expected := RESET_CMD
+	if !bytes.Equal(data, expected) {
+		t.Errorf("Reset sent wrong bytes. Got %v, expected %v", data, expected)
+	}
+}
+
+func TestReset_WriteRawFailure(t *testing.T) {
+	mock := &MockWritable{
+		WriteRawError: errors.New("write failed"),
+	}
+	printer := &Printer{
+		connection_string: "/test",
+		retryDelay:        0,
+		receipt_width:     576,
+		connection:        mock,
+	}
+
+	err := printer.Reset()
+	if err == nil {
+		t.Error("expected error when WriteRaw fails, got nil")
+	}
+}

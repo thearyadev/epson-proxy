@@ -25,6 +25,7 @@ var PRINT_RASTER_CMD = []byte{0x1d, 0x76, 0x30, 0x00}
 var FEED_N_CMD = func(n int) []byte {
 	return []byte{0x1b, 0x64, byte(n)}
 }
+var RESET_CMD = []byte{0x1b, 0x40}
 
 func withRetry[T any](p *Printer, maxRetries int, fn func() (T, error)) (T, error) {
 	var result T
@@ -285,3 +286,26 @@ func (p *Printer) Close() error {
 	log.Printf("[PRINTER] Printer connection closed successfully")
 	return nil
 }
+
+func (p *Printer) Reset() error {
+	log.Printf("[PRINTER] Reset called")
+
+	_, err := withRetry(p, 8, func() (any, error) {
+		log.Printf("[PRINTER] Sending reset command (1B 40)")
+		err := p.connection.WriteRaw(RESET_CMD)
+		if err != nil {
+			return nil, fmt.Errorf("reset command failed: %w", err)
+		}
+		log.Printf("[PRINTER] Reset command sent successfully")
+		return nil, nil
+	})
+
+	if err != nil {
+		log.Printf("[PRINTER] ERROR: Reset operation failed: %v", err)
+	} else {
+		log.Printf("[PRINTER] Reset operation completed successfully")
+	}
+
+	return err
+}
+

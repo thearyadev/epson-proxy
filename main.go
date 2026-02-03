@@ -285,6 +285,8 @@ func main() {
 			}
 		}
 
+		printer.Reset()
+
 		log.Printf("[HTTP] Request #%d: All instructions processed successfully, sending success response", requestCount)
 		w.Header().Set("Content-Type", "text/xml; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
