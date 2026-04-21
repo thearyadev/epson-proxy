@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
@@ -33,6 +34,35 @@ type ImageDecoded struct {
 	Data   []byte
 }
 
+const (
+	eposNamespacePrefix = "http://www.epson-pos.com/schemas/"
+	eposNamespaceSuffix = "/epos-print"
+)
+
+func isSupportedEposNamespace(namespace string) bool {
+	if !strings.HasPrefix(namespace, eposNamespacePrefix) || !strings.HasSuffix(namespace, eposNamespaceSuffix) {
+		return false
+	}
+
+	version := strings.TrimSuffix(strings.TrimPrefix(namespace, eposNamespacePrefix), eposNamespaceSuffix)
+	if version == "" {
+		return false
+	}
+
+	for _, part := range strings.Split(version, "/") {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
 func Parse(xmlData []byte) (*EposPrint, error) {
 	log.Printf("[PARSER] Starting XML parsing of %d bytes", len(xmlData))
 
@@ -40,10 +70,13 @@ func Parse(xmlData []byte) (*EposPrint, error) {
 		Instructions: []Instruction{},
 	}
 
-	decoder := xml.NewDecoder(strings.NewReader(string(xmlData)))
+	decoder := xml.NewDecoder(bytes.NewReader(xmlData))
 
 	var currentImage *ImageDecoded
 	var inImage bool
+	var rootSeen bool
+	var rootOpen bool
+	rootDepth := 0
 	tokenCount := 0
 
 	for {
@@ -64,16 +97,34 @@ func Parse(xmlData []byte) (*EposPrint, error) {
 			space := se.Name.Space
 			log.Printf("[PARSER] Token %d: StartElement <%s> in namespace '%s'", tokenCount, name, space)
 
-			if name == "epos-print" && strings.Contains(space, "epson-pos") {
+			if !rootSeen {
+				if name != "epos-print" || !isSupportedEposNamespace(space) {
+					log.Printf("[PARSER] ERROR: Invalid root element <%s> in namespace '%s'", name, space)
+					return nil, fmt.Errorf("invalid EPOS root element <%s> in namespace %q", name, space)
+				}
+
+				rootSeen = true
+				rootOpen = true
+				rootDepth = 1
 				epos.XMLName = se.Name
 				log.Printf("[PARSER] Found root element: epos-print (namespace: %s)", space)
-			} else if name == "pulse" && strings.Contains(space, "epson-pos") {
+				continue
+			}
+
+			if !rootOpen {
+				log.Printf("[PARSER] ERROR: Unexpected element <%s> after root was closed", name)
+				return nil, fmt.Errorf("unexpected element <%s> after epos-print root", name)
+			}
+
+			rootDepth++
+
+			if name == "pulse" && space == epos.XMLName.Space {
 				epos.Instructions = append(epos.Instructions, Instruction{Type: InstPulse})
 				log.Printf("[PARSER] Added instruction: PULSE (kick drawer) [total: %d]", len(epos.Instructions))
-			} else if name == "cut" && strings.Contains(space, "epson-pos") {
+			} else if name == "cut" && space == epos.XMLName.Space {
 				epos.Instructions = append(epos.Instructions, Instruction{Type: InstCut})
 				log.Printf("[PARSER] Added instruction: CUT [total: %d]", len(epos.Instructions))
-			} else if name == "image" && strings.Contains(space, "epson-pos") {
+			} else if name == "image" && space == epos.XMLName.Space {
 				inImage = true
 				currentImage = &ImageDecoded{}
 				log.Printf("[PARSER] Processing image element with attributes:")
@@ -90,7 +141,7 @@ func Parse(xmlData []byte) (*EposPrint, error) {
 
 		case xml.CharData:
 			content := strings.TrimSpace(string(se))
-			if inImage && currentImage != nil && content != "" {
+			if rootOpen && inImage && currentImage != nil && content != "" {
 				log.Printf("[PARSER] Processing base64 image data: %d characters", len(content))
 				decodedData, err := base64.StdEncoding.DecodeString(content)
 				if err != nil {
@@ -105,13 +156,17 @@ func Parse(xmlData []byte) (*EposPrint, error) {
 			name := se.Name.Local
 			space := se.Name.Space
 
-			if name == "image" && strings.Contains(space, "epson-pos") && inImage {
+			if rootOpen && name == "image" && space == epos.XMLName.Space && inImage {
 				inImage = false
-				expectedBytes := (currentImage.Width / 8) * currentImage.Height
+				widthBytes, expectedBytes, err := rasterDataSize(currentImage.Width, currentImage.Height)
+				if err != nil {
+					log.Printf("[PARSER] ERROR: Invalid image dimensions: %v", err)
+					return nil, fmt.Errorf("invalid image dimensions: %w", err)
+				}
 				log.Printf("[PARSER] Image element complete:")
 				log.Printf("[PARSER]   Decoded data: %d bytes", len(currentImage.Data))
-				log.Printf("[PARSER]   Expected size: %d bytes (width=%d/8 * height=%d)",
-					expectedBytes, currentImage.Width, currentImage.Height)
+				log.Printf("[PARSER]   Expected size: %d bytes (width_bytes=%d, width=%d, height=%d)",
+					expectedBytes, widthBytes, currentImage.Width, currentImage.Height)
 
 				if len(currentImage.Data) != expectedBytes {
 					log.Printf("[PARSER] ERROR: Image data size mismatch: got %d bytes, expected %d bytes",
@@ -127,7 +182,19 @@ func Parse(xmlData []byte) (*EposPrint, error) {
 					currentImage.Width, currentImage.Height, len(currentImage.Data), len(epos.Instructions))
 				currentImage = nil
 			}
+
+			if rootOpen {
+				rootDepth--
+				if rootDepth == 0 {
+					rootOpen = false
+				}
+			}
 		}
+	}
+
+	if !rootSeen {
+		log.Printf("[PARSER] ERROR: Missing epos-print root element")
+		return nil, fmt.Errorf("missing epos-print root element")
 	}
 
 	log.Printf("[PARSER] XML parsing complete: %d instructions parsed", len(epos.Instructions))

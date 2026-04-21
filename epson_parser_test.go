@@ -38,6 +38,23 @@ func TestParse_ValidXML(t *testing.T) {
 	}
 }
 
+func TestParse_ValidXML_2011Namespace(t *testing.T) {
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<epos-print xmlns="http://www.epson-pos.com/schemas/2011/03/epos-print">
+	<pulse/>
+	<cut/>
+</epos-print>`
+
+	result, err := Parse([]byte(xml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.Instructions) != 2 {
+		t.Fatalf("expected 2 instructions, got %d", len(result.Instructions))
+	}
+}
+
 func TestParse_MultipleInstructions(t *testing.T) {
 	xml := `<?xml version="1.0" encoding="UTF-8"?>
 <epos-print xmlns="http://www.epson-pos.com/schemas/2012/10/epos-print">
@@ -67,13 +84,9 @@ func TestParse_MultipleInstructions(t *testing.T) {
 func TestParse_EmptyXML(t *testing.T) {
 	xml := ``
 
-	result, err := Parse([]byte(xml))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.Instructions) != 0 {
-		t.Errorf("expected 0 instructions, got %d", len(result.Instructions))
+	_, err := Parse([]byte(xml))
+	if err == nil {
+		t.Fatal("expected error for empty XML, got nil")
 	}
 }
 
@@ -127,13 +140,21 @@ func TestParse_WrongNamespace(t *testing.T) {
 	<cut/>
 </epos-print>`
 
-	result, err := Parse([]byte(xml))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := Parse([]byte(xml))
+	if err == nil {
+		t.Fatal("expected error for wrong namespace, got nil")
 	}
+}
 
-	if len(result.Instructions) != 0 {
-		t.Errorf("expected 0 instructions (wrong namespace), got %d", len(result.Instructions))
+func TestParse_LookalikeNamespaceRejected(t *testing.T) {
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<epos-print xmlns="https://example.com/not-really-epson-pos">
+	<pulse/>
+</epos-print>`
+
+	_, err := Parse([]byte(xml))
+	if err == nil {
+		t.Fatal("expected error for lookalike namespace, got nil")
 	}
 }
 
@@ -141,13 +162,9 @@ func TestParse_MissingRoot(t *testing.T) {
 	xml := `<?xml version="1.0" encoding="UTF-8"?>
 <pulse xmlns="http://www.epson-pos.com/schemas/2012/10/epos-print"/>`
 
-	result, err := Parse([]byte(xml))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.Instructions) != 1 {
-		t.Errorf("expected 1 instruction, got %d", len(result.Instructions))
+	_, err := Parse([]byte(xml))
+	if err == nil {
+		t.Fatal("expected error for missing epos-print root, got nil")
 	}
 }
 
@@ -214,6 +231,53 @@ func TestParse_ValidBase64Image(t *testing.T) {
 
 	if len(img.Data) != 8 {
 		t.Errorf("expected 8 bytes of data, got %d", len(img.Data))
+	}
+}
+
+func TestParse_NonByteAlignedWidthUsesCeilingBytes(t *testing.T) {
+	imageData := []byte{0xAA, 0xBB, 0xCC, 0xDD}
+	b64Data := base64.StdEncoding.EncodeToString(imageData)
+
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<epos-print xmlns="http://www.epson-pos.com/schemas/2012/10/epos-print">
+	<image width="9" height="2">` + b64Data + `</image>
+</epos-print>`
+
+	result, err := Parse([]byte(xml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.Instructions) != 1 {
+		t.Fatalf("expected 1 instruction, got %d", len(result.Instructions))
+	}
+
+	img := result.Instructions[0].Image
+	if img == nil {
+		t.Fatal("expected image to not be nil")
+	}
+
+	if len(img.Data) != len(imageData) {
+		t.Fatalf("expected %d bytes of image data, got %d", len(imageData), len(img.Data))
+	}
+}
+
+func TestParse_NonByteAlignedWidthRejectsShortData(t *testing.T) {
+	imageData := []byte{0xAA}
+	b64Data := base64.StdEncoding.EncodeToString(imageData)
+
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<epos-print xmlns="http://www.epson-pos.com/schemas/2012/10/epos-print">
+	<image width="9" height="1">` + b64Data + `</image>
+</epos-print>`
+
+	_, err := Parse([]byte(xml))
+	if err == nil {
+		t.Fatal("expected error for truncated non-byte-aligned image data, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "expected 2 bytes") {
+		t.Fatalf("expected byte-count mismatch error, got: %v", err)
 	}
 }
 

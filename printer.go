@@ -114,8 +114,11 @@ func NewPrinter(connection_string string, receipt_width int, con_type Connection
 func (p *Printer) PrintGraphics(data []byte, width int, height int) error {
 	log.Printf("[PRINTER] PrintGraphics called: width=%d, height=%d, data_size=%d bytes", width, height, len(data))
 
-	width_bytes := width / 8
-	required_bytes := width_bytes * height
+	width_bytes, required_bytes, err := rasterDataSize(width, height)
+	if err != nil {
+		log.Printf("[PRINTER] ERROR: Invalid raster dimensions: %v", err)
+		return err
+	}
 	log.Printf("[PRINTER] Calculated: width_bytes=%d, required_bytes=%d", width_bytes, required_bytes)
 
 	if len(data) < required_bytes {
@@ -124,7 +127,11 @@ func (p *Printer) PrintGraphics(data []byte, width int, height int) error {
 	}
 
 	raster_data := data[:required_bytes]
-	paper_width_bytes := p.receipt_width / 8
+	paper_width_bytes, err := rasterWidthBytes(p.receipt_width)
+	if err != nil {
+		log.Printf("[PRINTER] ERROR: Invalid receipt width: %v", err)
+		return err
+	}
 	log.Printf("[PRINTER] Paper width: %d pixels (%d bytes)", p.receipt_width, paper_width_bytes)
 
 	if width < p.receipt_width {
@@ -158,7 +165,7 @@ func (p *Printer) PrintGraphics(data []byte, width int, height int) error {
 	log.Printf("[PRINTER] Command buffer prepared: %d bytes total", len(buf))
 
 	log.Printf("[PRINTER] Sending raster print command with retry...")
-	_, err := withRetry(p, 3, func() (any, error) {
+	_, err = withRetry(p, 3, func() (any, error) {
 		return nil, p.connection.WriteRaw(buf)
 	})
 
@@ -308,4 +315,3 @@ func (p *Printer) Reset() error {
 
 	return err
 }
-

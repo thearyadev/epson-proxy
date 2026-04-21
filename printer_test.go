@@ -262,6 +262,41 @@ func TestPrintGraphics_WithCentering(t *testing.T) {
 	}
 }
 
+func TestPrintGraphics_NonByteAlignedWidth(t *testing.T) {
+	printer, path := createMockPrinter()
+	defer os.Remove(path)
+
+	printer.receipt_width = 9
+
+	width := 9
+	height := 2
+	data := []byte{0x11, 0x22, 0x33, 0x44}
+
+	err := printer.PrintGraphics(data, width, height)
+	if err != nil {
+		t.Fatalf("PrintGraphics failed: %v", err)
+	}
+
+	fileData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read file: %v", err)
+	}
+
+	offset := len(PRINT_RASTER_CMD)
+	if fileData[offset] != 2 || fileData[offset+1] != 0 {
+		t.Fatalf("expected width bytes to be 2,0 got %d,%d", fileData[offset], fileData[offset+1])
+	}
+	if fileData[offset+2] != 2 || fileData[offset+3] != 0 {
+		t.Fatalf("expected height bytes to be 2,0 got %d,%d", fileData[offset+2], fileData[offset+3])
+	}
+
+	rasterStart := offset + 4
+	rasterEnd := rasterStart + len(data)
+	if !bytes.Equal(fileData[rasterStart:rasterEnd], data) {
+		t.Fatalf("expected raster payload %v, got %v", data, fileData[rasterStart:rasterEnd])
+	}
+}
+
 func TestPrintGraphics_DataTooShort(t *testing.T) {
 	printer, path := createMockPrinter()
 	defer os.Remove(path)
