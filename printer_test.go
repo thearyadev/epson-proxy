@@ -32,27 +32,28 @@ func (m *MockWritable) Close() error {
 	return m.CloseError
 }
 
-func createMockPrinter() (*Printer, string) {
-	f, err := os.CreateTemp("/tmp/", "epsonproxytest")
+func createMockPrinter(t *testing.T) (*Printer, string) {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "epsonproxytest")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	printer, err := NewPrinter(f.Name(), 576, UsbPath)
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
-	printer.connection = &UsbWriter{
-		path:   f.Name(),
-		writer: f,
-	}
+	t.Cleanup(func() { printer.Close() })
 	printer.retryDelay = 0 // No delay for tests
 
 	return printer, f.Name()
 }
 
 func TestWithRetry_RetriesSuccessful(t *testing.T) {
-	printer, _ := createMockPrinter()
+	printer, _ := createMockPrinter(t)
 	count := 0
 	numRetries := 3
 	fn := func() (*string, error) {
@@ -67,8 +68,7 @@ func TestWithRetry_RetriesSuccessful(t *testing.T) {
 }
 
 func TestKickDrawer_Bytes(t *testing.T) {
-	printer, path := createMockPrinter()
-	defer os.Remove(path)
+	printer, path := createMockPrinter(t)
 
 	err := printer.KickDrawer()
 	if err != nil {
@@ -104,8 +104,7 @@ func TestKickDrawer_WriteRawFailure(t *testing.T) {
 }
 
 func TestCut_Bytes(t *testing.T) {
-	printer, path := createMockPrinter()
-	defer os.Remove(path)
+	printer, path := createMockPrinter(t)
 
 	err := printer.Cut()
 	if err != nil {
@@ -157,8 +156,7 @@ func TestCut_WriteRawFailure(t *testing.T) {
 }
 
 func TestPrintGraphics_NoCentering(t *testing.T) {
-	printer, path := createMockPrinter()
-	defer os.Remove(path)
+	printer, path := createMockPrinter(t)
 
 	// Use width >= receipt_width to avoid centering
 	width := 576 // Same as receipt width
@@ -208,8 +206,7 @@ func TestPrintGraphics_NoCentering(t *testing.T) {
 }
 
 func TestPrintGraphics_WithCentering(t *testing.T) {
-	printer, path := createMockPrinter()
-	defer os.Remove(path)
+	printer, path := createMockPrinter(t)
 
 	// Use width < receipt_width to trigger centering
 	width := 64 // 8 bytes
@@ -263,8 +260,7 @@ func TestPrintGraphics_WithCentering(t *testing.T) {
 }
 
 func TestPrintGraphics_NonByteAlignedWidth(t *testing.T) {
-	printer, path := createMockPrinter()
-	defer os.Remove(path)
+	printer, path := createMockPrinter(t)
 
 	printer.receipt_width = 9
 
@@ -298,8 +294,7 @@ func TestPrintGraphics_NonByteAlignedWidth(t *testing.T) {
 }
 
 func TestPrintGraphics_DataTooShort(t *testing.T) {
-	printer, path := createMockPrinter()
-	defer os.Remove(path)
+	printer, _ := createMockPrinter(t)
 
 	width := 64
 	height := 10
@@ -435,8 +430,7 @@ func TestCenter_ExactSize(t *testing.T) {
 }
 
 func TestClose(t *testing.T) {
-	printer, path := createMockPrinter()
-	defer os.Remove(path)
+	printer, _ := createMockPrinter(t)
 
 	err := printer.Close()
 	if err != nil {
@@ -669,8 +663,7 @@ func TestWithRetry_CloseAndOpenSequence(t *testing.T) {
 }
 
 func TestReset_Bytes(t *testing.T) {
-	printer, path := createMockPrinter()
-	defer os.Remove(path)
+	printer, path := createMockPrinter(t)
 
 	err := printer.Reset()
 	if err != nil {
@@ -702,5 +695,31 @@ func TestReset_WriteRawFailure(t *testing.T) {
 	err := printer.Reset()
 	if err == nil {
 		t.Error("expected error when WriteRaw fails, got nil")
+	}
+}
+
+func TestPrintReceiptPreservesStreamCommandOrder(t *testing.T) {
+	mock := &MockWritable{}
+	printer := &Printer{connection: mock}
+	receipt := &EposPrint{Instructions: []Instruction{{Type: InstPulse}, {Type: InstCut}}}
+	if err := printer.PrintReceipt(receipt); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]byte{{0x1b, 0x70, 0, 25, 25}, CUT_CMD, FEED_N_CMD(2), RESET_CMD}
+	if len(mock.WriteRawCalls) != len(want) {
+		t.Fatalf("got %d writes, want %d", len(mock.WriteRawCalls), len(want))
+	}
+	for i := range want {
+		if !bytes.Equal(mock.WriteRawCalls[i], want[i]) {
+			t.Fatalf("command %d = %x, want %x", i, mock.WriteRawCalls[i], want[i])
+		}
+	}
+}
+
+func TestPrintReceiptReportsResetFailure(t *testing.T) {
+	writeErr := errors.New("reset failed")
+	printer := &Printer{connection: &MockWritable{WriteRawError: writeErr}}
+	if err := printer.PrintReceipt(&EposPrint{}); !errors.Is(err, writeErr) {
+		t.Fatalf("receipt hid reset failure: %v", err)
 	}
 }

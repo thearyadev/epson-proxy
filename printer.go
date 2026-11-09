@@ -1,16 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 )
 
 type Printer struct {
+	mu                sync.Mutex
 	connection_string string
 	receipt_width     int
 	connection        Writable
 	retryDelay        time.Duration
+	jobName           string
 }
 
 type ConnectionType int
@@ -18,7 +22,14 @@ type ConnectionType int
 const (
 	TcpSocket ConnectionType = iota
 	UsbPath
+	WindowsRaw
 )
+
+type PrinterOption func(*Printer)
+
+func WithJobName(name string) PrinterOption {
+	return func(p *Printer) { p.jobName = name }
+}
 
 var CUT_CMD = []byte{0x1d, 'V', 0x00}
 var PRINT_RASTER_CMD = []byte{0x1d, 0x76, 0x30, 0x00}
@@ -28,6 +39,10 @@ var FEED_N_CMD = func(n int) []byte {
 var RESET_CMD = []byte{0x1b, 0x40}
 
 func withRetry[T any](p *Printer, maxRetries int, fn func() (T, error)) (T, error) {
+	if _, raw := p.connection.(*RawWriter); raw {
+		return fn()
+	}
+
 	var result T
 	var err error
 
@@ -76,7 +91,7 @@ func withRetry[T any](p *Printer, maxRetries int, fn func() (T, error)) (T, erro
 	return result, err
 }
 
-func NewPrinter(connection_string string, receipt_width int, con_type ConnectionType) (*Printer, error) {
+func NewPrinter(connection_string string, receipt_width int, con_type ConnectionType, options ...PrinterOption) (*Printer, error) {
 	log.Printf("[PRINTER] Creating new printer instance:")
 	log.Printf("[PRINTER]   Connection string: %s", connection_string)
 	log.Printf("[PRINTER]   Receipt width: %d pixels", receipt_width)
@@ -86,6 +101,10 @@ func NewPrinter(connection_string string, receipt_width int, con_type Connection
 		connection_string: connection_string,
 		receipt_width:     receipt_width,
 		retryDelay:        2 * time.Second,
+		jobName:           defaultJobName,
+	}
+	for _, option := range options {
+		option(p)
 	}
 
 	switch con_type {
@@ -95,6 +114,20 @@ func NewPrinter(connection_string string, receipt_width int, con_type Connection
 	case UsbPath:
 		p.connection = &UsbWriter{path: connection_string}
 		log.Printf("[PRINTER] Created USB writer for path: %s", connection_string)
+	case WindowsRaw:
+		writer, err := newRawWriter(connection_string, p.jobName)
+		if err != nil {
+			return nil, err
+		}
+		p.connection = writer
+		// Report configuration and spooler errors immediately; do not silently
+		// retry Windows calls that may already have had an effect.
+		if err := writer.Open(); err != nil {
+			return nil, err
+		}
+		return p, nil
+	default:
+		return nil, fmt.Errorf("unknown connection type: %d", con_type)
 	}
 
 	log.Printf("[PRINTER] Establishing initial connection...")
@@ -110,6 +143,55 @@ func NewPrinter(connection_string string, receipt_width int, con_type Connection
 		time.Sleep(2 * time.Second)
 	}
 }
+
+// PrintReceipt serializes HTTP receipts. RAW receipts are rendered first so all
+// images, drawer pulses, cuts and the final reset belong to one spooler job.
+func (p *Printer) PrintReceipt(epos *EposPrint) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var buffer receiptBuffer
+	target := p
+	_, raw := p.connection.(*RawWriter)
+	if raw {
+		target = &Printer{receipt_width: p.receipt_width, connection: &buffer}
+	}
+	for i, inst := range epos.Instructions {
+		var err error
+		switch inst.Type {
+		case InstImage:
+			if inst.Image != nil {
+				err = target.PrintGraphics(inst.Image.Data, inst.Image.Width, inst.Image.Height)
+			}
+		case InstPulse:
+			err = target.KickDrawer()
+		case InstCut:
+			err = target.Cut()
+		default:
+			log.Printf("[PRINTER] Skipping unknown instruction type: %v", inst.Type)
+		}
+		if err != nil {
+			return fmt.Errorf("instruction %d: %w", i+1, err)
+		}
+	}
+	if err := target.Reset(); err != nil {
+		return err
+	}
+	if raw {
+		return p.connection.WriteRaw(buffer.Bytes())
+	}
+	return nil
+}
+
+type receiptBuffer struct{ bytes.Buffer }
+
+func (b *receiptBuffer) WriteRaw(data []byte) error {
+	_, err := b.Write(data)
+	return err
+}
+
+func (b *receiptBuffer) Open() error  { return nil }
+func (b *receiptBuffer) Close() error { return nil }
 
 func (p *Printer) PrintGraphics(data []byte, width int, height int) error {
 	log.Printf("[PRINTER] PrintGraphics called: width=%d, height=%d, data_size=%d bytes", width, height, len(data))
@@ -277,6 +359,8 @@ func center(d []byte, w_b int, p_w_b int, h int) ([]byte, error) {
 }
 
 func (p *Printer) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	log.Printf("[PRINTER] Close called for printer: %s", p.connection_string)
 
 	if p.connection == nil {

@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -112,9 +113,10 @@ func isOriginAllowed(origin string, allowedOrigins []string) bool {
 
 func main() {
 	var (
-		printerConn    = flag.String("printer", "", "Printer connection string (required)")
+		printerConn    = flag.String("printer", "", "Printer device path, TCP address, or Windows printer queue name (required)")
 		receiptWidth   = flag.Int("receipt-width", 576, "Receipt width in pixels")
-		proto          = flag.String("proto", "", "Protocol: USB or TCP (required)")
+		proto          = flag.String("proto", "", "Protocol: USB, TCP, or RAW (Windows only) (required)")
+		jobName        = flag.String("job-name", defaultJobName, "Document title for Windows RAW print jobs")
 		host           = flag.String("host", "127.0.0.1", "Server host")
 		port           = flag.String("port", "8000", "Server port")
 		secure         = flag.Bool("secure", false, "Use HTTPS")
@@ -147,6 +149,7 @@ func main() {
 	log.Printf("[MAIN]   -printer: %s", *printerConn)
 	log.Printf("[MAIN]   -receipt-width: %d pixels", *receiptWidth)
 	log.Printf("[MAIN]   -proto: %s", *proto)
+	log.Printf("[MAIN]   -job-name: %s", *jobName)
 	log.Printf("[MAIN]   -host: %s", *host)
 	log.Printf("[MAIN]   -port: %s", *port)
 	log.Printf("[MAIN]   -secure: %v", *secure)
@@ -167,21 +170,24 @@ func main() {
 	}
 
 	var connType ConnectionType
-	switch *proto {
+	switch strings.ToUpper(*proto) {
 	case "TCP":
 		connType = TcpSocket
 		log.Printf("[MAIN] Selected protocol: TCP (TcpSocket)")
 	case "USB":
 		connType = UsbPath
 		log.Printf("[MAIN] Selected protocol: USB (UsbPath)")
+	case "RAW":
+		connType = WindowsRaw
+		log.Printf("[MAIN] Selected protocol: RAW (Windows spooler)")
 	default:
 		log.Printf("[MAIN] ERROR: Unknown protocol specified: %s", *proto)
-		fmt.Fprintf(os.Stderr, "Unknown protocol: %s (must be USB or TCP)\n", *proto)
+		fmt.Fprintf(os.Stderr, "Unknown protocol: %s (must be USB, TCP, or RAW)\n", *proto)
 		os.Exit(1)
 	}
 
 	log.Printf("[MAIN] Initializing printer connection to: %s", *printerConn)
-	printer, err := NewPrinter(*printerConn, *receiptWidth, connType)
+	printer, err := NewPrinter(*printerConn, *receiptWidth, connType, WithJobName(*jobName))
 	if err != nil {
 		log.Fatalf("[MAIN] FATAL: Failed to connect to printer: %v", err)
 	}
@@ -195,9 +201,9 @@ func main() {
 	}()
 	log.Printf("[MAIN] Printer connected successfully: %s", printer.connection_string)
 
-	requestCount := 0
+	var requestCounter atomic.Uint64
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		requestCount := requestCounter.Add(1)
 		origin := r.Header.Get("Origin")
 		log.Printf("[HTTP] Request #%d received: %s %s from %s", requestCount, r.Method, r.URL.Path, r.RemoteAddr)
 		log.Printf("[HTTP]   Content-Type: %s", r.Header.Get("Content-Type"))
@@ -255,46 +261,11 @@ func main() {
 		}
 		log.Printf("[XML] Request #%d: XML parsed successfully, found %d instruction(s)", requestCount, len(epos.Instructions))
 
-		for i, inst := range epos.Instructions {
-			switch inst.Type {
-			case InstImage:
-				if inst.Image != nil {
-					log.Printf("[PRINT] Request #%d: Processing image instruction [%d/%d]: width=%d, height=%d, data_size=%d bytes",
-						requestCount, i+1, len(epos.Instructions), inst.Image.Width, inst.Image.Height, len(inst.Image.Data))
-					err = printer.PrintGraphics(inst.Image.Data, inst.Image.Width, inst.Image.Height)
-					if err != nil {
-						log.Printf("[PRINT] Request #%d: ERROR printing image: %v", requestCount, err)
-						http.Error(w, fmt.Sprintf("Failed to print image: %v", err), http.StatusInternalServerError)
-						return
-					}
-					log.Printf("[PRINT] Request #%d: Image printed successfully", requestCount)
-				} else {
-					log.Printf("[PRINT] Request #%d: WARNING image instruction has nil image data", requestCount)
-				}
-			case InstPulse:
-				log.Printf("[PRINT] Request #%d: Processing kick drawer (pulse) instruction [%d/%d]", requestCount, i+1, len(epos.Instructions))
-				err = printer.KickDrawer()
-				if err != nil {
-					log.Printf("[PRINT] Request #%d: ERROR kicking drawer: %v", requestCount, err)
-					http.Error(w, fmt.Sprintf("Failed to kick drawer: %v", err), http.StatusInternalServerError)
-					return
-				}
-				log.Printf("[PRINT] Request #%d: Drawer kicked successfully", requestCount)
-			case InstCut:
-				log.Printf("[PRINT] Request #%d: Processing cut instruction [%d/%d]", requestCount, i+1, len(epos.Instructions))
-				err = printer.Cut()
-				if err != nil {
-					log.Printf("[PRINT] Request #%d: ERROR cutting paper: %v", requestCount, err)
-					http.Error(w, fmt.Sprintf("Failed to cut: %v", err), http.StatusInternalServerError)
-					return
-				}
-				log.Printf("[PRINT] Request #%d: Paper cut successfully", requestCount)
-			default:
-				log.Printf("[PRINT] Request #%d: WARNING unknown instruction type: %v", requestCount, inst.Type)
-			}
+		if err := printer.PrintReceipt(epos); err != nil {
+			log.Printf("[PRINT] Request #%d: ERROR printing receipt: %v", requestCount, err)
+			http.Error(w, fmt.Sprintf("Failed to print receipt: %v", err), http.StatusInternalServerError)
+			return
 		}
-
-		printer.Reset()
 
 		log.Printf("[HTTP] Request #%d: All instructions processed successfully, sending success response", requestCount)
 		w.Header().Set("Content-Type", "text/xml; charset=utf-8")

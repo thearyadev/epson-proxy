@@ -2,7 +2,10 @@ name: goreleaser
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
+    branches:
+      - "**"
     tags:
       - "*"
 
@@ -21,7 +24,17 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: Run GoReleaser
+      - name: Build snapshot binaries
+        if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "latest"
+          args: release --snapshot --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish tagged release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
@@ -29,3 +42,12 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN}}
+      - name: Upload binary archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: epson-proxy-binaries
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+          if-no-files-found: error
