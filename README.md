@@ -9,6 +9,8 @@ A lightweight HTTP proxy server for Epson POS printers that accepts XML-based pr
 - **Paper Cutting**: Full and partial cut commands
 - **Cash Drawer**: Kick drawer/cash drawer pulse commands
 
+Images print consecutively without added blank feed lines. `<cut/>` uses Epson's [feed-and-cut command](https://download4.epson.biz/sec_pubs/pos/reference_en/escpos/gs_cv.html) (`GS V 65 0`) to advance to the cutter with no extra margin; the printer's physical print-head-to-cutter gap still applies.
+
 ### Connection Types
 - **USB**: Direct USB device connection (e.g., `/dev/usb/lp0`) [UNSUPPORTED ON WINDOWS]
 - **TCP**: Network-connected printers (e.g., `192.168.1.100:9100`)

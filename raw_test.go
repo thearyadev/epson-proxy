@@ -233,6 +233,7 @@ func TestRawReceiptIsOneOrderedJob(t *testing.T) {
 	p := &Printer{connection: testRawWriter(t, device), receipt_width: 8}
 	receipt := &EposPrint{Instructions: []Instruction{
 		{Type: InstImage, Image: &ImageDecoded{Width: 8, Height: 1, Data: []byte{0xa5}}},
+		{Type: InstImage, Image: &ImageDecoded{Width: 8, Height: 1, Data: []byte{0x5a}}},
 		{Type: InstPulse}, {Type: InstCut},
 	}}
 	if err := p.PrintReceipt(receipt); err != nil {
@@ -240,9 +241,9 @@ func TestRawReceiptIsOneOrderedJob(t *testing.T) {
 	}
 	want := []byte{
 		0x1d, 0x76, 0x30, 0x00, 1, 0, 1, 0, 0xa5, // Raster header and pixels.
-		0x1b, 0x64, 12, // Existing feed after image.
+		0x1d, 0x76, 0x30, 0x00, 1, 0, 1, 0, 0x5a, // Next image without blank feed lines.
 		0x1b, 0x70, 0, 25, 25, // Drawer pulse.
-		0x1d, 0x56, 0, 0x1b, 0x64, 2, // Cut and feed.
+		0x1d, 0x56, 65, 0, // Feed to cutter and cut, without extra margin.
 		0x1b, 0x40, // Final reset.
 	}
 	if len(device.jobs) != 1 || !bytes.Equal(device.jobs[0], want) {
@@ -286,7 +287,7 @@ func TestConcurrentRawReceiptsStaySeparate(t *testing.T) {
 	}
 	seen := make(map[byte]bool)
 	for _, data := range device.jobs {
-		if len(data) != 20 {
+		if len(data) != 15 {
 			t.Fatalf("receipt commands interleaved: %x", data)
 		}
 		seen[data[8]] = true

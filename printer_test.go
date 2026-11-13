@@ -116,31 +116,15 @@ func TestCut_Bytes(t *testing.T) {
 		t.Fatalf("failed to read file: %v", err)
 	}
 
-	expected := append(CUT_CMD, FEED_N_CMD(2)...)
+	expected := []byte{0x1d, 0x56, 65, 0} // Feed to cutter, full cut, no extra margin.
 	if !bytes.Equal(data, expected) {
 		t.Errorf("Cut sent wrong bytes. Got %v, expected %v", data, expected)
 	}
 }
 
-// Custom mock for testing partial failures in Cut
-type PartialFailMock struct {
-	callCount int
-	failAfter int
-}
-
-func (p *PartialFailMock) WriteRaw(data []byte) error {
-	p.callCount++
-	if p.callCount > p.failAfter {
-		return errors.New("write failed")
-	}
-	return nil
-}
-
-func (p *PartialFailMock) Open() error  { return nil }
-func (p *PartialFailMock) Close() error { return nil }
-
 func TestCut_WriteRawFailure(t *testing.T) {
-	mock := &PartialFailMock{failAfter: 1} // Fail on second call (FEED)
+	writeErr := errors.New("write failed")
+	mock := &MockWritable{WriteRawError: writeErr}
 
 	printer := &Printer{
 		connection_string: "/test",
@@ -150,8 +134,8 @@ func TestCut_WriteRawFailure(t *testing.T) {
 	}
 
 	err := printer.Cut()
-	if err == nil {
-		t.Error("expected error when WriteRaw fails on feed, got nil")
+	if !errors.Is(err, writeErr) {
+		t.Errorf("expected cut write failure, got %v", err)
 	}
 }
 
@@ -198,10 +182,10 @@ func TestPrintGraphics_NoCentering(t *testing.T) {
 			fileData[offset+2], fileData[offset+3], yL, yH)
 	}
 
-	// Verify footer
-	expectedFooter := FEED_N_CMD(12)
-	if !bytes.HasSuffix(fileData, expectedFooter) {
-		t.Errorf("PrintGraphics missing feed command footer")
+	// A raster image must end with its pixels, without adding blank feed lines.
+	expected := append([]byte{0x1d, 0x76, 0x30, 0x00, xL, xH, yL, yH}, data...)
+	if !bytes.Equal(fileData, expected) {
+		t.Errorf("PrintGraphics sent wrong bytes. Got %x, expected %x", fileData, expected)
 	}
 }
 
@@ -700,12 +684,22 @@ func TestReset_WriteRawFailure(t *testing.T) {
 
 func TestPrintReceiptPreservesStreamCommandOrder(t *testing.T) {
 	mock := &MockWritable{}
-	printer := &Printer{connection: mock}
-	receipt := &EposPrint{Instructions: []Instruction{{Type: InstPulse}, {Type: InstCut}}}
+	printer := &Printer{connection: mock, receipt_width: 8}
+	receipt := &EposPrint{Instructions: []Instruction{
+		{Type: InstImage, Image: &ImageDecoded{Width: 8, Height: 1, Data: []byte{0xa5}}},
+		{Type: InstImage, Image: &ImageDecoded{Width: 8, Height: 1, Data: []byte{0x5a}}},
+		{Type: InstPulse}, {Type: InstCut},
+	}}
 	if err := printer.PrintReceipt(receipt); err != nil {
 		t.Fatal(err)
 	}
-	want := [][]byte{{0x1b, 0x70, 0, 25, 25}, CUT_CMD, FEED_N_CMD(2), RESET_CMD}
+	want := [][]byte{
+		{0x1d, 0x76, 0x30, 0x00, 1, 0, 1, 0, 0xa5},
+		{0x1d, 0x76, 0x30, 0x00, 1, 0, 1, 0, 0x5a},
+		{0x1b, 0x70, 0, 25, 25},
+		{0x1d, 0x56, 65, 0},
+		{0x1b, 0x40},
+	}
 	if len(mock.WriteRawCalls) != len(want) {
 		t.Fatalf("got %d writes, want %d", len(mock.WriteRawCalls), len(want))
 	}

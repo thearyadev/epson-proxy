@@ -31,11 +31,9 @@ func WithJobName(name string) PrinterOption {
 	return func(p *Printer) { p.jobName = name }
 }
 
-var CUT_CMD = []byte{0x1d, 'V', 0x00}
+// GS V 65 0 advances to the cutter before a full cut, with no extra margin.
+var CUT_CMD = []byte{0x1d, 'V', 65, 0}
 var PRINT_RASTER_CMD = []byte{0x1d, 0x76, 0x30, 0x00}
-var FEED_N_CMD = func(n int) []byte {
-	return []byte{0x1b, 0x64, byte(n)}
-}
 var RESET_CMD = []byte{0x1b, 0x40}
 
 func withRetry[T any](p *Printer, maxRetries int, fn func() (T, error)) (T, error) {
@@ -237,13 +235,12 @@ func (p *Printer) PrintGraphics(data []byte, width int, height int) error {
 	yH := byte((height >> 8) & 0xff)
 	log.Printf("[PRINTER] Raster command parameters: xL=%d, xH=%d, yL=%d, yH=%d", xL, xH, yL, yH)
 
-	totalLen := 4 + 4 + len(raster_data) + 3
+	totalLen := 4 + 4 + len(raster_data)
 	buf := make([]byte, 0, totalLen)
 
 	buf = append(buf, PRINT_RASTER_CMD...)
 	buf = append(buf, xL, xH, yL, yH)
 	buf = append(buf, raster_data...)
-	buf = append(buf, FEED_N_CMD(12)...)
 	log.Printf("[PRINTER] Command buffer prepared: %d bytes total", len(buf))
 
 	log.Printf("[PRINTER] Sending raster print command with retry...")
@@ -286,19 +283,12 @@ func (p *Printer) Cut() error {
 	log.Printf("[PRINTER] Cut called - executing paper cut sequence")
 
 	_, err := withRetry(p, 8, func() (any, error) {
-		log.Printf("[PRINTER] Sending cut command (GS V 0)")
+		log.Printf("[PRINTER] Sending feed-to-cutter and cut command (GS V 65 0)")
 		err := p.connection.WriteRaw(CUT_CMD)
 		if err != nil {
 			return nil, fmt.Errorf("cut command failed: %w", err)
 		}
 		log.Printf("[PRINTER] Cut command sent successfully")
-
-		log.Printf("[PRINTER] Sending feed command (ESC d 2)")
-		err = p.connection.WriteRaw(FEED_N_CMD(2))
-		if err != nil {
-			return nil, fmt.Errorf("feed command failed: %w", err)
-		}
-		log.Printf("[PRINTER] Feed command sent successfully")
 
 		return nil, nil
 	})
